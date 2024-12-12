@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::pin::Pin;
 
 use anyhow::{ensure, Result};
 use futures_util::{join, Stream, StreamExt};
@@ -10,7 +10,7 @@ use gtk::{
 };
 use gtk_source::{prelude::*, subclass::prelude::*};
 
-use crate::utils;
+use crate::{cancelled::Cancelled, utils};
 
 /// Unmarks the document as busy on drop.
 struct MarkBusyGuard<'a> {
@@ -29,7 +29,10 @@ const FILE_SAVER_FLAGS: gtk_source::FileSaverFlags =
         .union(gtk_source::FileSaverFlags::IGNORE_MODIFICATION_TIME);
 
 mod imp {
-    use std::{cell::Cell, marker::PhantomData};
+    use std::{
+        cell::{Cell, RefCell},
+        marker::PhantomData,
+    };
 
     use glib::subclass::Signal;
     use once_cell::sync::Lazy;
@@ -51,6 +54,7 @@ mod imp {
         pub(super) is_busy: Cell<bool>,
 
         pub(super) source_file: gtk_source::File,
+        pub(super) load_cancellable: RefCell<Option<gio::Cancellable>>,
     }
 
     #[glib::object_subclass]
@@ -209,9 +213,16 @@ impl Document {
 
         let _guard = self.mark_busy();
 
+        let cancellable = gio::Cancellable::new();
+        imp.load_cancellable.replace(Some(cancellable.clone()));
+
         let loader = gtk_source::FileLoader::new(self, &imp.source_file);
-        self.handle_file_io(loader.load_future(FILE_IO_PRIORITY))
-            .await?;
+        let (io_fut, progress_stream) = loader.load_future(FILE_IO_PRIORITY);
+        let (io_res, _) = join!(
+            gio::CancellableFuture::new(io_fut, cancellable),
+            self.handle_progress_stream(progress_stream)
+        );
+        io_res.map_err(|_| Cancelled)??;
 
         self.emit_text_changed();
 
@@ -231,8 +242,9 @@ impl Document {
             .file(&imp.source_file)
             .flags(FILE_SAVER_FLAGS)
             .build();
-        self.handle_file_io(saver.save_future(FILE_IO_PRIORITY))
-            .await?;
+        let (io_fut, progress_stream) = saver.save_future(FILE_IO_PRIORITY);
+        let (io_res, _) = join!(io_fut, self.handle_progress_stream(progress_stream));
+        io_res?;
 
         self.set_modified(false);
 
@@ -253,8 +265,9 @@ impl Document {
             .file(&imp.source_file)
             .flags(FILE_SAVER_FLAGS)
             .build();
-        self.handle_file_io(saver.save_future(FILE_IO_PRIORITY))
-            .await?;
+        let (io_fut, progress_stream) = saver.save_future(FILE_IO_PRIORITY);
+        let (io_res, _) = join!(io_fut, self.handle_progress_stream(progress_stream));
+        io_res?;
 
         self.notify_file();
         self.notify_title();
@@ -353,29 +366,18 @@ impl Document {
         title_start.visible_text(&title_end).to_string()
     }
 
-    #[allow(clippy::type_complexity)]
-    async fn handle_file_io(
+    async fn handle_progress_stream(
         &self,
-        (io_fut, mut progress_stream): (
-            impl Future<Output = Result<(), glib::Error>>,
-            Pin<Box<dyn Stream<Item = (i64, i64)>>>,
-        ),
-    ) -> Result<()> {
-        let progress_fut = async {
-            while let Some((current_n_bytes, total_n_bytes)) = progress_stream.next().await {
-                let progress = if total_n_bytes == 0 || current_n_bytes > total_n_bytes {
-                    1.0
-                } else {
-                    current_n_bytes as f64 / total_n_bytes as f64
-                };
-                self.set_busy_progress(progress);
-            }
-        };
-
-        let (io_ret, _) = join!(io_fut, progress_fut);
-        io_ret?;
-
-        Ok(())
+        mut progress_stream: Pin<Box<dyn Stream<Item = (i64, i64)>>>,
+    ) {
+        while let Some((current_n_bytes, total_n_bytes)) = progress_stream.next().await {
+            let progress = if total_n_bytes == 0 || current_n_bytes > total_n_bytes {
+                1.0
+            } else {
+                current_n_bytes as f64 / total_n_bytes as f64
+            };
+            self.set_busy_progress(progress);
+        }
     }
 
     fn update_style_scheme(&self) {

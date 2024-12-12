@@ -1,4 +1,4 @@
-use std::{cell::RefCell, error, fmt, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use adw::prelude::*;
 use anyhow::Result;
@@ -8,23 +8,11 @@ use gtk::{
     glib::{self, clone},
 };
 
-use crate::{document::Document, i18n::gettext_f, utils, window::Window};
+use crate::{cancelled::Cancelled, document::Document, i18n::gettext_f, utils, window::Window};
 
 const CANCEL_RESPONSE_ID: &str = "cancel";
 const DISCARD_RESPONSE_ID: &str = "discard";
 const SAVE_RESPONSE_ID: &str = "save";
-
-/// Indicates that the user cancelled the operation.
-#[derive(Debug)]
-struct Cancelled;
-
-impl fmt::Display for Cancelled {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Task cancelled")
-    }
-}
-
-impl error::Error for Cancelled {}
 
 struct SaveFileItem<'a> {
     document: &'a Document,

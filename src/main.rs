@@ -25,6 +25,7 @@
 
 mod about;
 mod application;
+mod cancelled;
 mod config;
 mod document;
 mod drag_overlay;
